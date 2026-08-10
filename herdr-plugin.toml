@@ -1,0 +1,27 @@
+id = "herdr-mupot-bridge"
+name = "herdr-mupot-bridge"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Mupot record <-> herdr board bridge: flight monitor (Loom's semantics), presence report, inbox report."
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["bash", "bridge/start.sh"]
+
+[[actions]]
+id = "flight-board"
+title = "Mupot flight board"
+contexts = ["workspace"]
+command = ["bash", "bridge/flight-board.sh", "--once"]
+
+[[actions]]
+id = "presence-report"
+title = "Herdr board presence"
+contexts = ["workspace"]
+command = ["bash", "bridge/presence-report.sh"]
+
+[[actions]]
+id = "inbox-deliver"
+title = "Mupot inbox -> seat pane (deliver hop + receipts)"
+contexts = ["workspace"]
+command = ["bash", "bridge/inbox-deliver.sh"]
