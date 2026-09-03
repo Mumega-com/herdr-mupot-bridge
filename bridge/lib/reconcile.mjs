@@ -54,13 +54,29 @@ export function filterStillUnread(candidates, unreadIds) {
  */
 export async function reconcileBeforeDeliver(candidates, fetchUnreadIds, onStale) {
   if (!Array.isArray(candidates) || candidates.length === 0) return []
-  let unreadIds
+  let unreadResult
   try {
-    unreadIds = await fetchUnreadIds()
+    unreadResult = await fetchUnreadIds()
   } catch {
     return candidates // fail open — see module docstring
   }
-  if (!(unreadIds instanceof Set)) return candidates // malformed response — fail open, same reason
+
+  // Completeness check: a partial set must NEVER be used to declare a message settled.
+  // Supports { ids: Set<string>, complete: boolean } (v0.3.0) and legacy Set<string> (defensive).
+  let unreadIds
+  if (unreadResult instanceof Set) {
+    unreadIds = unreadResult
+  } else if (unreadResult && unreadResult.ids instanceof Set) {
+    if (unreadResult.complete !== true) {
+      // INCOMPLETE READ (e.g. pagination limit reached, cursor didn't advance, or producer returned truncated set)
+      // Fail open: deliver the queue unchanged rather than silently dropping genuinely unread messages.
+      return candidates
+    }
+    unreadIds = unreadResult.ids
+  } else {
+    return candidates // malformed response — fail open, same reason
+  }
+
   const kept = filterStillUnread(candidates, unreadIds)
   if (onStale && kept.length !== candidates.length) {
     const keptIds = new Set(kept.map((m) => m.id))

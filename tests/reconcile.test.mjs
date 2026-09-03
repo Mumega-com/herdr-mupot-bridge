@@ -86,4 +86,29 @@ describe('reconcileBeforeDeliver', () => {
 
     expect(onStale).not.toHaveBeenCalled()
   })
+
+  it('drops stale messages when { ids, complete: true } is returned by fetchUnreadIds', async () => {
+    const candidates = [{ id: 'm1', seq: 1 }, { id: 'm2', seq: 2 }]
+    const fetchUnreadIds = vi.fn().mockResolvedValue({ ids: new Set(['m2']), complete: true })
+    const onStale = vi.fn()
+
+    const result = await reconcileBeforeDeliver(candidates, fetchUnreadIds, onStale)
+
+    expect(result).toEqual([{ id: 'm2', seq: 2 }])
+    expect(onStale).toHaveBeenCalledWith({ id: 'm1', seq: 1 })
+  })
+
+  it('fails OPEN when { ids, complete: false } is returned — never drops on partial reads', async () => {
+    // Exact defect caught by Kasra: producer returned 100 of 150 rows with complete=false.
+    // Deferred holds m120 (not in the first 100) and m5.
+    // Because complete is false, reconcile MUST NOT drop m120!
+    const candidates = [{ id: 'm120', seq: 120 }, { id: 'm5', seq: 5 }]
+    const fetchUnreadIds = vi.fn().mockResolvedValue({ ids: new Set(['m5']), complete: false })
+    const onStale = vi.fn()
+
+    const result = await reconcileBeforeDeliver(candidates, fetchUnreadIds, onStale)
+
+    expect(result).toEqual(candidates)
+    expect(onStale).not.toHaveBeenCalled()
+  })
 })

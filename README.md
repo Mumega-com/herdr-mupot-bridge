@@ -1,4 +1,4 @@
-# herdr-mupot-bridge v0.1.0
+# herdr-mupot-bridge v0.3.0
 
 Mupot record <-> herdr board bridge. Spec: `docs/herdr/herdr-mupot-bridge-plugin.md`.
 Flight semantics contract: Loom (spec §5.5).

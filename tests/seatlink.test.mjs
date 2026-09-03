@@ -40,6 +40,44 @@ describe('formatPotMail', () => {
     expect(text).not.toContain('send the required correlated ACK')
     expect(text).toContain('No ACK is required')
   })
+
+  it('asks for an ACK when expects_reply is true and reply_basis is request_id_field', () => {
+    const text = formatPotMail('muvps_kasra', {
+      id: 'm1',
+      seq: 10,
+      request_id: 'req-1',
+      kind: 'message',
+      expects_reply: true,
+      reply_basis: 'request_id_field',
+    })
+    expect(text).toContain('send the required correlated ACK')
+  })
+
+  it('does NOT ask for an ACK when expects_reply is true but reply_basis is body_token (prose quote)', () => {
+    const text = formatPotMail('muvps_kasra', {
+      id: 'm1',
+      seq: 10,
+      request_id: null,
+      kind: 'message',
+      expects_reply: true,
+      reply_basis: 'body_token',
+    })
+    expect(text).not.toContain('send the required correlated ACK')
+    expect(text).toContain('No ACK is required')
+  })
+
+  it('does NOT ask for an ACK when expects_reply is false (e.g. terminal ack)', () => {
+    const text = formatPotMail('muvps_kasra', {
+      id: 'm1',
+      seq: 10,
+      request_id: 'ack-id-1',
+      kind: 'ack',
+      expects_reply: false,
+      reply_basis: null,
+    })
+    expect(text).not.toContain('send the required correlated ACK')
+    expect(text).toContain('No ACK is required')
+  })
 })
 
 describe('fetchUnreadIds', () => {
@@ -53,16 +91,16 @@ describe('fetchUnreadIds', () => {
     vi.unstubAllGlobals()
   })
 
-  it('calls the peek endpoint with the seat bearer token and returns a Set of unread ids', async () => {
+  it('calls the peek endpoint with the seat bearer token and returns unread ids', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ ok: true, messages: [{ id: 'a' }, { id: 'b' }] }),
+      json: async () => ({ ok: true, messages: [{ id: 'a' }, { id: 'b' }], remaining: 0 }),
     })
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await fetchUnreadIds(SEAT)
 
-    expect(result).toEqual(new Set(['a', 'b']))
+    expect(result).toEqual({ ids: new Set(['a', 'b']), complete: true })
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, opts] = fetchMock.mock.calls[0]
     expect(url).toBe('https://pot.test/api/inbox?peek=1&limit=100')
@@ -81,6 +119,91 @@ describe('fetchUnreadIds', () => {
 
   it('throws when no seat config was ever registered', async () => {
     await expect(fetchUnreadIds('never-registered-seat')).rejects.toThrow(/no mupot config/)
+  })
+
+  it('pages deterministically across multiple pages when complete is false using since_seq', async () => {
+    const fetchMock = vi.fn()
+      // Page 1: 2 messages, complete: false, ends at seq 102
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ok: true,
+          complete: false,
+          remaining: 1,
+          messages: [{ id: 'msg-1', seq: 101 }, { id: 'msg-2', seq: 102 }],
+        }),
+      })
+      // Page 2: 1 message, complete: true, ends at seq 103
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ok: true,
+          complete: true,
+          remaining: 0,
+          messages: [{ id: 'msg-3', seq: 103 }],
+        }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchUnreadIds(SEAT)
+
+    expect(result).toEqual({ ids: new Set(['msg-1', 'msg-2', 'msg-3']), complete: true })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[0][0]).toBe('https://pot.test/api/inbox?peek=1&limit=100')
+    expect(fetchMock.mock.calls[1][0]).toBe('https://pot.test/api/inbox?peek=1&limit=100&since_seq=102')
+  })
+
+  it('terminates immediately and does not page when complete is true on the first page', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        complete: true,
+        remaining: 0,
+        messages: [{ id: 'single', seq: 50 }],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchUnreadIds(SEAT)
+
+    expect(result).toEqual({ ids: new Set(['single']), complete: true })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('determines complete: true on un-upgraded producer when remaining is 0 without complete flag', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        remaining: 0,
+        messages: [{ id: 'legacy-msg', seq: 25 }],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchUnreadIds(SEAT)
+
+    expect(result).toEqual({ ids: new Set(['legacy-msg']), complete: true })
+  })
+
+  it('marks complete: false when sequence cursor does not advance', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        complete: false,
+        remaining: 10,
+        messages: [{ id: 'stuck', seq: 50 }],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchUnreadIds(SEAT)
+
+    expect(result).toEqual({ ids: new Set(['stuck']), complete: false })
+    // First page fetched, seen seq 50; second page returned same seq 50 -> breaks immediately
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
 

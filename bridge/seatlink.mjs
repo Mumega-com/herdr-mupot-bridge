@@ -65,6 +65,7 @@ import path from "node:path";
 import os from "node:os";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { reconcileBeforeDeliver } from "./lib/reconcile.mjs";
 
 const HOME = os.homedir();
@@ -374,14 +375,20 @@ function readTokenPath(p) {
   return fs.readFileSync(p, "utf8").replace(/\r?\n/g, "").trim();
 }
 
-// A message this bridge is about to (re-)offer only actually needs an ACK when the message
-// itself asked for one. Previously this said "send the required correlated ACK" for every
-// delivery, kind:"ack" replies included — one of the things that manufactured ACK-chain noise
-// (mumega-com#1179 discussion, defect A: the mupot server now refuses request_id on kind:"ack"
-// at the source, but an already-in-flight or hand-composed envelope could still reach here, and
-// this offer text should not itself instruct a reply the protocol doesn't need).
+// formatPotMail formats the prompt text injected into a Herdr seat pane when mupot mail arrives.
+//
+// ADOPT expects_reply & reply_basis (mupot#1278 @ 51d12b6f, Athena Gate requirement):
+// - When annotated: require an ACK only if expects_reply === true AND reply_basis === "request_id_field".
+// - Do NOT require an ACK if reply_basis is "body_token" (prose quotes of prior requests must not trigger loops).
+// - Never require an ACK if expects_reply is false (e.g. kind:"ack" messages, which carry request_id
+//   solely as a sender idempotency key under migration 0032).
+// - Fall back safely to (msg.request_id && msg.kind !== "ack") if an unannotated legacy envelope is passed.
 export function formatPotMail(herdrName, msg) {
-  const ackLine = msg.request_id && msg.kind !== "ack"
+  const expectsReply = typeof msg.expects_reply === "boolean"
+    ? msg.expects_reply && msg.reply_basis === "request_id_field"
+    : Boolean(msg.request_id && msg.kind !== "ack");
+
+  const ackLine = expectsReply
     ? "and send the required correlated ACK."
     : "No ACK is required for this message.";
   return [
@@ -423,18 +430,54 @@ async function injectPotMail(herdrName, msg) {
 
 // Fetch the ids of currently-unread mupot messages for this seat's bound agent, via the SAME
 // peek surface the SSE stream itself is built on (GET /api/inbox?peek=1 — never consumes).
-// limit=100 is MAX_INBOX_LIMIT server-side and returns oldest-unread-first, which is exactly
-// the ordering a deferred queue needs: entries here were fetched earliest, so they are the
-// oldest unread rows if they are still unread at all.
+// limit=100 is MAX_INBOX_LIMIT server-side and returns oldest-unread-first.
+//
+// DETERMINISTIC PAGINATION & COMPLETENESS (mupot#1280, v0.3.0):
+// Returns { ids: Set<string>, complete: boolean }.
+// Completeness is guaranteed only when the producer explicitly signals complete: true, or
+// when an un-upgraded producer reports remaining: 0, or when the returned page is empty.
+// If pagination terminates prematurely (e.g. 20-page cap or stalled seq cursor), complete
+// remains false so reconcileBeforeDeliver can fail open rather than silently dropping mail.
 export async function fetchUnreadIds(herdrName) {
   const cfg = seatMupotConfig.get(herdrName);
   if (!cfg) throw new Error(`no mupot config for seat ${herdrName}`);
-  const url = `${cfg.api.replace(/\/$/, "")}/api/inbox?peek=1&limit=100`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${cfg.token}` } });
-  if (!res.ok) throw new Error(`inbox peek HTTP ${res.status}`);
-  const body = await res.json();
-  if (!body?.ok || !Array.isArray(body.messages)) throw new Error("inbox peek: malformed response");
-  return new Set(body.messages.map((m) => m.id));
+  const unreadIds = new Set();
+  let sinceSeq = null;
+  let isComplete = false;
+  const baseApi = cfg.api.replace(/\/$/, "");
+
+  for (let page = 0; page < 20; page++) {
+    const url = `${baseApi}/api/inbox?peek=1&limit=100${sinceSeq != null ? `&since_seq=${sinceSeq}` : ""}`;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${cfg.token}` } });
+    if (!res.ok) throw new Error(`inbox peek HTTP ${res.status}`);
+    const body = await res.json();
+    if (!body?.ok || !Array.isArray(body.messages)) throw new Error("inbox peek: malformed response");
+
+    for (const m of body.messages) {
+      if (m && typeof m.id === "string") unreadIds.add(m.id);
+    }
+
+    if (body.complete === true) {
+      isComplete = true;
+      break;
+    }
+    if (body.remaining === 0) {
+      isComplete = true;
+      break;
+    }
+    if (body.messages.length === 0) {
+      isComplete = true;
+      break;
+    }
+
+    const lastMsg = body.messages[body.messages.length - 1];
+    if (typeof lastMsg?.seq !== "number" || lastMsg.seq <= (sinceSeq ?? -1)) {
+      break;
+    }
+    sinceSeq = lastMsg.seq;
+  }
+
+  return { ids: unreadIds, complete: isComplete };
 }
 
 export async function drainDeferred(herdrName) {
@@ -567,30 +610,34 @@ async function doctor() {
 }
 
 // ---------------------------------------------------------------- main
-const argv = process.argv.slice(2);
-const has = (f) => argv.includes(f);
-const val = (f) => { const i = argv.indexOf(f); return i === -1 ? undefined : argv[i + 1]; };
+const isDirectRun = Boolean(process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]));
 
-try {
-  if (has("--serve")) await serve();
-  else if (has("--watch")) await serve({ watchOnly: true });
-  else if (has("--seat-map")) await seatMapCmd();
-  else if (has("--receipts")) receiptsCmd();
-  else if (has("--doctor")) await doctor();
-  else if (has("--send")) {
-    const from = val("--from"), to = val("--to"), body = val("--body");
-    if (!from || !to || !body) {
-      console.error("usage: --send --from <seat> --to <seat> --body <text> [--request-id <uuid>]");
-      process.exit(2);
+if (isDirectRun) {
+  const argv = process.argv.slice(2);
+  const has = (f) => argv.includes(f);
+  const val = (f) => { const i = argv.indexOf(f); return i === -1 ? undefined : argv[i + 1]; };
+
+  try {
+    if (has("--serve")) await serve();
+    else if (has("--watch")) await serve({ watchOnly: true });
+    else if (has("--seat-map")) await seatMapCmd();
+    else if (has("--receipts")) receiptsCmd();
+    else if (has("--doctor")) await doctor();
+    else if (has("--send")) {
+      const from = val("--from"), to = val("--to"), body = val("--body");
+      if (!from || !to || !body) {
+        console.error("usage: --send --from <seat> --to <seat> --body <text> [--request-id <uuid>]");
+        process.exit(2);
+      }
+      await sendCmd(from, to, body, val("--request-id"));
+    } else {
+      console.log("mupot-seatlink v0.3.0");
+      console.log("  --serve       event-driven daemon (plugin startup)");
+      console.log("  --watch       print every event, route nothing (diagnostic)");
+      console.log("  --seat-map    live seat map from Herdr");
+      console.log("  --send        --from S --to S --body TEXT [--request-id ID]");
+      console.log("  --receipts    accepted/delivered/consumed/acked table");
+      console.log("  --doctor      socket, protocol, seats, failing services");
     }
-    await sendCmd(from, to, body, val("--request-id"));
-  } else {
-    console.log("mupot-seatlink v0.3.0");
-    console.log("  --serve       event-driven daemon (plugin startup)");
-    console.log("  --watch       print every event, route nothing (diagnostic)");
-    console.log("  --seat-map    live seat map from Herdr");
-    console.log("  --send        --from S --to S --body TEXT [--request-id ID]");
-    console.log("  --receipts    accepted/delivered/consumed/acked table");
-    console.log("  --doctor      socket, protocol, seats, failing services");
-  }
-} catch (e) { console.error("FATAL:", e.message); process.exit(1); }
+  } catch (e) { console.error("FATAL:", e.message); process.exit(1); }
+}
