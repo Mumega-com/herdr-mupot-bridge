@@ -94,7 +94,7 @@ describe('fetchUnreadIds', () => {
   it('calls the peek endpoint with the seat bearer token and returns unread ids', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ ok: true, messages: [{ id: 'a' }, { id: 'b' }], remaining: 0 }),
+      json: async () => ({ ok: true, messages: [{ id: 'a', seq: 1 }, { id: 'b', seq: 2 }], remaining: 0 }),
     })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -249,6 +249,61 @@ describe('fetchUnreadIds', () => {
 
     expect(result).toEqual({ ids: new Set(), complete: false })
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does NOT mark complete: true when response is contradictory (complete: true with remaining > 0)', async () => {
+    // Athena P0 probe: complete: true, remaining: 5, messages: [] is contradictory.
+    // Must fail open with complete: false so queued unread messages are never dropped.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        complete: true,
+        remaining: 5,
+        messages: [],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchUnreadIds(SEAT)
+
+    expect(result).toEqual({ ids: new Set(), complete: false })
+  })
+
+  it('fails open when messages contain a malformed row missing an id', async () => {
+    // Athena P0 probe: complete: true, remaining: 0, messages: [{ seq: 1 }] (missing id).
+    // Must NOT return empty ids with complete: true; must fail open.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        complete: true,
+        remaining: 0,
+        messages: [{ seq: 1 }],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchUnreadIds(SEAT)
+
+    expect(result).toEqual({ ids: new Set(), complete: false })
+  })
+
+  it('fails open when messages contain a malformed row missing a seq', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        complete: true,
+        remaining: 0,
+        messages: [{ id: 'm1' }],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchUnreadIds(SEAT)
+
+    expect(result).toEqual({ ids: new Set(), complete: false })
   })
 })
 

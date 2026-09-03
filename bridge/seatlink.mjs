@@ -453,22 +453,39 @@ export async function fetchUnreadIds(herdrName) {
     if (!body?.ok || !Array.isArray(body.messages)) throw new Error("inbox peek: malformed response");
 
     for (const m of body.messages) {
-      if (m && typeof m.id === "string") unreadIds.add(m.id);
+      if (!m || typeof m.id !== "string" || !m.id || typeof m.seq !== "number") {
+        // Malformed message row (Athena P0): e.g. missing id or invalid seq.
+        // Fail open immediately — never allow malformed rows to masquerade as an empty complete set!
+        return { ids: new Set(), complete: false };
+      }
+      unreadIds.add(m.id);
     }
 
-    if (body.complete === true || body.remaining === 0) {
+    const hasRemaining = typeof body.remaining === "number";
+
+    // Contradictory check (Athena P0): complete: true combined with remaining > 0 is contradictory.
+    if (body.complete === true && hasRemaining && body.remaining > 0) {
+      break; // Fail open
+    }
+
+    // Consistent completeness conditions:
+    // 1. New producer: complete === true AND (remaining === 0 || !hasRemaining)
+    // 2. Un-upgraded producer: remaining === 0 (when complete is undefined)
+    const isExplicitlyComplete = body.complete === true && (!hasRemaining || body.remaining === 0);
+    const isLegacyComplete = body.complete === undefined && hasRemaining && body.remaining === 0;
+
+    if (isExplicitlyComplete || isLegacyComplete) {
       isComplete = true;
       break;
     }
+
     if (body.messages.length === 0) {
-      // Empty page without complete: true or remaining === 0 cannot prove completeness
-      // (Athena gate condition: e.g. cursor filtered page or transient remaining > 0).
-      // Break with isComplete staying false so reconciler fails open.
+      // Empty page without consistent complete true + remaining 0 cannot prove completeness.
       break;
     }
 
     const lastMsg = body.messages[body.messages.length - 1];
-    if (typeof lastMsg?.seq !== "number" || lastMsg.seq <= (sinceSeq ?? -1)) {
+    if (lastMsg.seq <= (sinceSeq ?? -1)) {
       break;
     }
     sinceSeq = lastMsg.seq;
