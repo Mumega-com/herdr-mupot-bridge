@@ -1,0 +1,13 @@
+{
+  "name": "herdr-mupot-bridge",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "herdr<->mupot bridge: flight monitor, presence report, inbox deliver hop (seatlink).",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.8"
+  }
+}
