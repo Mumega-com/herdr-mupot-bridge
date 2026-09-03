@@ -65,10 +65,11 @@ across unbounded elapsed time without ever re-validating it, which is why it is 
 unchanged, because dropping a message that is genuinely still unread is silent message loss —
 strictly worse than the false-work this fix removes. A second, smaller fix in the same commit:
 `formatPotMail()` used to say "send the required correlated ACK" on every offer unconditionally;
-it now says that only when the message actually carries a `request_id` and is not itself a
-`kind:"ack"` reply — see the ACK-chain-terminal-marker discussion in mumega-com#1179 and the
-paired mupot-repo fix (`sendAgentMessage` now refuses `request_id` on `kind:"ack"` at the
-source; this is defense in depth at the offer-text layer for anything that reaches here anyway).
+it now adopts `mupot#1278` / `#1280` (`expects_reply` and `reply_basis === "request_id_field"`).
+Terminal `kind:"ack"` messages retain `request_id` solely as a replay-once idempotency key
+under migration 0032, but report `expects_reply: false`. Messages carrying quoted request IDs
+(`reply_basis: "body_token"`) or `expects_reply: false` resolve to "No ACK is required", terminating
+ACK loops cleanly while preserving deduplication idempotency.
 
 **Tests.** `npm test` (vitest) — `tests/reconcile.test.mjs` covers the pure filter/fail-open
 policy; `tests/seatlink.test.mjs` covers the wiring (`fetchUnreadIds`'s HTTP call,

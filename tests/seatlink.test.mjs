@@ -33,9 +33,9 @@ describe('formatPotMail', () => {
   })
 
   it('does NOT ask for an ACK when the message is itself an ack, even if it carries request_id', () => {
-    // Defense in depth: the mupot server now refuses request_id on kind:"ack" at the source
-    // (mumega-com#1179 defect A), but this offer text should not compound a hand-composed or
-    // already-in-flight envelope that slipped through by demanding yet another reply.
+    // Under accepted mupot#1278, terminal ACKs retain request_id for migration 0032 idempotency,
+    // but report expects_reply: false. Even on legacy unannotated envelopes, formatPotMail
+    // inspects kind !== 'ack' so terminal ACKs never compound ACK loops.
     const text = formatPotMail('muvps_kasra', { id: 'm1', seq: 10, request_id: 'req-1', kind: 'ack' })
     expect(text).not.toContain('send the required correlated ACK')
     expect(text).toContain('No ACK is required')
@@ -229,6 +229,27 @@ describe('fetchUnreadIds', () => {
     expect(result.ids.size).toBe(20)
     expect(fetchMock).toHaveBeenCalledTimes(20)
   })
+
+  it('does NOT mark complete: true when an empty page is returned with complete: false and remaining > 0', async () => {
+    // Athena P0 gate finding: an empty page where complete: false and remaining: 5 must NOT
+    // be marked complete: true. If marked complete, reconcileBeforeDeliver would see an empty
+    // complete set and falsely drop queued unread messages.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        complete: false,
+        remaining: 5,
+        messages: [],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchUnreadIds(SEAT)
+
+    expect(result).toEqual({ ids: new Set(), complete: false })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('drainDeferred', () => {
@@ -260,7 +281,7 @@ describe('drainDeferred', () => {
     deferred.set(SEAT, [{ id: 'already-consumed', seq: 1 }])
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ ok: true, messages: [] }), // nothing unread — it was consumed elsewhere
+      json: async () => ({ ok: true, messages: [], complete: true, remaining: 0 }), // nothing unread — certified complete
     }))
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
 

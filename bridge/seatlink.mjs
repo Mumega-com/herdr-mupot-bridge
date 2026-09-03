@@ -13,10 +13,9 @@
 //      on that module. This is the actual fix for the measured defect: a deferred message
 //      can be consumed through a different channel (direct inbox_ack, the Stop hook) while
 //      it sits in this queue, and drain used to deliver it anyway.
-//   2. formatPotMail() only tells the reader to send an ACK when the message actually
-//      carries a request_id and is not itself an ack — previously it said "send the
-//      required correlated ACK" unconditionally, which is one of the things that manufactured
-//      ACK-chain noise (mumega-com#1179 discussion, defect A).
+//   2. formatPotMail() adopts mupot#1278 / #1280 (expects_reply && reply_basis === "request_id_field").
+//      Terminal kind:"ack" replies retain request_id as an idempotency key (migration 0032)
+//      but are annotated with expects_reply: false, so they no longer manufacture ACK-chain noise.
 // Everything else — the Herdr event-subscription transport, the sentinel/dedupe logic, the
 // SSE inbox client, the receipt log — is unchanged from the live v0.2.0 script. Deploying this
 // (rsync to the host + `systemctl --user restart mupot-seatlink`) is NOT part of this repo
@@ -457,16 +456,14 @@ export async function fetchUnreadIds(herdrName) {
       if (m && typeof m.id === "string") unreadIds.add(m.id);
     }
 
-    if (body.complete === true) {
-      isComplete = true;
-      break;
-    }
-    if (body.remaining === 0) {
+    if (body.complete === true || body.remaining === 0) {
       isComplete = true;
       break;
     }
     if (body.messages.length === 0) {
-      isComplete = true;
+      // Empty page without complete: true or remaining === 0 cannot prove completeness
+      // (Athena gate condition: e.g. cursor filtered page or transient remaining > 0).
+      // Break with isComplete staying false so reconciler fails open.
       break;
     }
 
