@@ -111,4 +111,23 @@ describe('reconcileBeforeDeliver', () => {
     expect(result).toEqual(candidates)
     expect(onStale).not.toHaveBeenCalled()
   })
+
+  it('correctly drops an 11-message burst of already-settled messages against complete: true', async () => {
+    // Live incident 2026-09-03 (mumega-com#1179): 11 stale offers arrived in one burst
+    // for seqs 3862, 3864, 3865, 3867, 3869, 3871, 3872, 3873, 3875, 3877 and 3878.
+    // All 11 were already settled (read_at IS NOT NULL on server).
+    // The producer reports complete: true and 0 unread messages for this seat.
+    // Reconciler MUST drop all 11 and deliver 0.
+    const candidates = [
+      3862, 3864, 3865, 3867, 3869, 3871, 3872, 3873, 3875, 3877, 3878,
+    ].map((seq) => ({ id: `msg-${seq}`, seq }))
+
+    const fetchUnreadIds = vi.fn().mockResolvedValue({ ids: new Set(), complete: true })
+    const onStale = vi.fn()
+
+    const result = await reconcileBeforeDeliver(candidates, fetchUnreadIds, onStale)
+
+    expect(result).toEqual([])
+    expect(onStale).toHaveBeenCalledTimes(11)
+  })
 })
