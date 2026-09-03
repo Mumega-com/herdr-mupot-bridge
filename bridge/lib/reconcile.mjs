@@ -62,21 +62,13 @@ export async function reconcileBeforeDeliver(candidates, fetchUnreadIds, onStale
   }
 
   // Completeness check: a partial set must NEVER be used to declare a message settled.
-  // Supports { ids: Set<string>, complete: boolean } (v0.3.0) and legacy Set<string> (defensive).
-  let unreadIds
-  if (unreadResult instanceof Set) {
-    unreadIds = unreadResult
-  } else if (unreadResult && unreadResult.ids instanceof Set) {
-    if (unreadResult.complete !== true) {
-      // INCOMPLETE READ (e.g. pagination limit reached, cursor didn't advance, or producer returned truncated set)
-      // Fail open: deliver the queue unchanged rather than silently dropping genuinely unread messages.
-      return candidates
-    }
-    unreadIds = unreadResult.ids
-  } else {
-    return candidates // malformed response — fail open, same reason
+  // ONLY an object explicitly providing { ids: Set<string>, complete: true } is authorized to drop.
+  // A bare Set cannot carry completeness, so it fails open alongside null/non-objects (mumega-com#1179).
+  if (!unreadResult || !(unreadResult.ids instanceof Set) || unreadResult.complete !== true) {
+    return candidates // fail open — cannot prove this set is whole
   }
 
+  const unreadIds = unreadResult.ids
   const kept = filterStillUnread(candidates, unreadIds)
   if (onStale && kept.length !== candidates.length) {
     const keptIds = new Set(kept.map((m) => m.id))

@@ -205,6 +205,30 @@ describe('fetchUnreadIds', () => {
     // First page fetched, seen seq 50; second page returned same seq 50 -> breaks immediately
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
+
+  it('marks complete: false when the 20-page ceiling is reached', async () => {
+    // Producer keeps returning messages with advancing seq, but complete stays false
+    let pageCount = 0
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      pageCount++
+      return {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          complete: false,
+          remaining: 100,
+          messages: [{ id: `msg-${pageCount}`, seq: pageCount }],
+        }),
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchUnreadIds(SEAT)
+
+    expect(result.complete).toBe(false)
+    expect(result.ids.size).toBe(20)
+    expect(fetchMock).toHaveBeenCalledTimes(20)
+  })
 })
 
 describe('drainDeferred', () => {

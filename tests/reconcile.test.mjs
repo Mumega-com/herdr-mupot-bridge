@@ -32,7 +32,7 @@ describe('reconcileBeforeDeliver', () => {
     // This is the exact defect: msg 'stale-msg' was fetched while the seat was busy, deferred,
     // and consumed via a direct inbox_ack call before the seat went idle and the queue drained.
     const candidates = [{ id: 'stale-msg', seq: 3736 }, { id: 'still-fresh', seq: 3737 }]
-    const fetchUnreadIds = vi.fn().mockResolvedValue(new Set(['still-fresh']))
+    const fetchUnreadIds = vi.fn().mockResolvedValue({ ids: new Set(['still-fresh']), complete: true })
     const onStale = vi.fn()
 
     const result = await reconcileBeforeDeliver(candidates, fetchUnreadIds, onStale)
@@ -44,7 +44,7 @@ describe('reconcileBeforeDeliver', () => {
 
   it('delivers everything when nothing has been consumed since it was queued', async () => {
     const candidates = [{ id: 'a' }, { id: 'b' }]
-    const fetchUnreadIds = vi.fn().mockResolvedValue(new Set(['a', 'b']))
+    const fetchUnreadIds = vi.fn().mockResolvedValue({ ids: new Set(['a', 'b']), complete: true })
 
     const result = await reconcileBeforeDeliver(candidates, fetchUnreadIds)
 
@@ -58,6 +58,18 @@ describe('reconcileBeforeDeliver', () => {
     const result = await reconcileBeforeDeliver(candidates, fetchUnreadIds)
 
     // Silent message loss is worse than one stale re-offer — see module docstring.
+    expect(result).toEqual(candidates)
+  })
+
+  it('fails OPEN on a bare Set because a bare Set cannot prove completeness', async () => {
+    // Kasra finding 2026-09-03: A bare Set has no completeness marker. If accepted as
+    // authoritative, a partial Set from a legacy producer drops unread messages.
+    // reconcileBeforeDeliver MUST fail open on a bare Set.
+    const candidates = [{ id: 'a' }, { id: 'b' }]
+    const fetchUnreadIds = vi.fn().mockResolvedValue(new Set(['a'])) // would drop 'b' if accepted!
+
+    const result = await reconcileBeforeDeliver(candidates, fetchUnreadIds)
+
     expect(result).toEqual(candidates)
   })
 
@@ -79,7 +91,7 @@ describe('reconcileBeforeDeliver', () => {
 
   it('does not call onStale when nothing was dropped', async () => {
     const candidates = [{ id: 'a' }]
-    const fetchUnreadIds = vi.fn().mockResolvedValue(new Set(['a']))
+    const fetchUnreadIds = vi.fn().mockResolvedValue({ ids: new Set(['a']), complete: true })
     const onStale = vi.fn()
 
     await reconcileBeforeDeliver(candidates, fetchUnreadIds, onStale)
